@@ -3,7 +3,12 @@ from __future__ import annotations
 import os
 
 _ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-_MODEL = "claude-sonnet-4-6"
+_MODEL = "claude-opus-5"
+# Thinking is on by default on this model and shares the max_tokens budget, so
+# the cap is well above what a 150-250 word briefing needs. These are short,
+# fully-specified generation tasks, so low effort keeps the demo responsive.
+_MAX_TOKENS = 4000
+_EFFORT = "low"
 
 
 class PLURAgent:
@@ -15,6 +20,19 @@ class PLURAgent:
             import anthropic
             self._client = anthropic.Anthropic(api_key=_ANTHROPIC_API_KEY)
         return self._client
+
+    def _complete(self, prompt: str) -> str | None:
+        """Return the model's text, or None if it declined to answer."""
+        msg = self._get_client().messages.create(
+            model=_MODEL,
+            max_tokens=_MAX_TOKENS,
+            output_config={"effort": _EFFORT},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if msg.stop_reason == "refusal":
+            return None
+        # Adaptive thinking means content[0] may be a thinking block, not text.
+        return next((b.text for b in msg.content if b.type == "text"), None)
 
     def generate_rationale(
         self,
@@ -46,12 +64,8 @@ Format: one line per key move. Each line starts with the artist name and move, t
 End with a one-line disclaimer. Keep it simple and readable."""
 
         try:
-            msg = self._get_client().messages.create(
-                model=_MODEL,
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text
+            text = self._complete(prompt)
+            return text if text else _placeholder_rationale(changes, risk_before, risk_after)
         except Exception as e:
             return f"{_placeholder_rationale(changes, risk_before, risk_after)}\n\n[Claude unavailable: {e}]"
 
@@ -116,12 +130,8 @@ PLUR is a planning and decision-support prototype, not a certified life-safety s
 Max 250 words. Plain text only. No bullet characters, no asterisks, no markdown."""
 
         try:
-            msg = self._get_client().messages.create(
-                model=_MODEL,
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text
+            text = self._complete(prompt)
+            return text if text else _placeholder_briefing(venue_name, peak_density)
         except Exception as e:
             return f"{_placeholder_briefing(venue_name, peak_density)}\n\n[Claude unavailable: {e}]"
 

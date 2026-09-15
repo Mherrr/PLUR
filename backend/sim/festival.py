@@ -83,6 +83,7 @@ def run_festival(
     sim_bin_minutes: float = 2.0,
     sample_every_bins: int = 1,
     extra_obstacles: list[list[list[float]]] | None = None,
+    density_orange: float = 4.0,
     density_red: float = 6.0,
     affinity: dict[str, dict[str, float]] | None = None,
 ) -> dict:
@@ -558,8 +559,9 @@ def run_festival(
         danger_score = peak_density * bottleneck_weight
         danger_score[exclude] = 0.0
 
-        # threshold: only flag cells above the red density threshold
-        threshold = density_red
+        # Flag from the caution threshold up; each hotspot is tagged red or
+        # orange below so the UI can distinguish crush risk from congestion.
+        threshold = min(density_orange, density_red)
         hot_cells = np.argwhere(danger_score > threshold)
 
         if len(hot_cells) > 0:
@@ -637,6 +639,7 @@ def run_festival(
                     "peak_density": round(float(display_density), 1),
                     "danger_score": round(float(peak_score), 1),
                     "peak_pressure": round(float(display_density * 0.3), 2),
+                    "level": "red" if peak_score > density_red else "orange",
                 })
 
     return {"frames": frames, "hotspots": hotspots}

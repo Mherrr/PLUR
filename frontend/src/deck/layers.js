@@ -259,7 +259,7 @@ export function buildSimLayers({ agents, barriers, hotspots, vis }) {
       radiusUnits: 'meters',
       radiusMinPixels: 8,
       getFillColor: [0, 0, 0, 0],
-      getLineColor: [255, 40, 40, 255],
+      getLineColor: d => (d.level === 'orange' ? [255, 150, 0, 235] : [255, 40, 40, 255]),
       stroked: true,
       lineWidthMinPixels: 2.5,
       pickable: true,

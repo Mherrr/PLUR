@@ -41,21 +41,23 @@ export const api = {
   deleteProject: id => del(`/projects/${id}`),
 
   // Simulation
-  simulateFestival: ({ projectId, setlist, sliders, barriers, densityRed }) =>
+  simulateFestival: ({ projectId, setlist, sliders, barriers, densityOrange, densityRed }) =>
     post('/simulate_festival', {
       venue_id: 'hard_summer_2025',
       project_id: projectId || '',
       setlist,
       sliders,
       barriers,
+      density_orange: densityOrange ?? 4.0,
       density_red: densityRed ?? 6.0,
     }),
 
   getSavedSim: id => get(`/projects/${id}/sim`),
 
-  optimizeSchedule: (setlist, headliners, sliders) =>
+  optimizeSchedule: (projectId, setlist, headliners, sliders) =>
     post('/optimize_schedule', {
       venue_id: 'hard_summer_2025',
+      project_id: projectId || '',
       setlist,
       headliners,
       sliders,
@@ -63,9 +65,10 @@ export const api = {
 
   getDemandScores: (artists) => post('/demand/scores', { artists }),
 
-  getSafetyBriefing: (setlist, sliders, peakDensity, hotspots, amenities) =>
+  getSafetyBriefing: (projectId, setlist, sliders, peakDensity, hotspots, amenities) =>
     post('/safety_briefing', {
       venue_id: 'hard_summer_2025',
+      project_id: projectId || '',
       setlist,
       sliders,
       peak_density: peakDensity,

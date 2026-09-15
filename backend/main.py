@@ -100,6 +100,7 @@ class SimSliders(BaseModel):
 
 class OptimizeRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
+    project_id: str = ""
     setlist: list[SetlistEntry]
     headliners: list[str] = []
     sliders: SimSliders = SimSliders()
@@ -111,11 +112,13 @@ class FestivalSimRequest(BaseModel):
     setlist: list[SetlistEntry] = []
     sliders: SimSliders = SimSliders()
     barriers: list[list[list[float]]] = []
+    density_orange: float = 4.0
     density_red: float = 6.0
 
 
 class SafetyBriefingRequest(BaseModel):
     venue_id: str = "hard_summer_2025"
+    project_id: str = ""
     setlist: list[SetlistEntry] = []
     sliders: SimSliders = SimSliders()
     peak_density: float = 0.0
@@ -151,6 +154,26 @@ def _get_venue(venue_id: str) -> VenueGrid:
 
 def _setlist_dicts(entries: list[SetlistEntry]) -> list[dict]:
     return [e.model_dump() for e in entries]
+
+
+async def _resolve_venue(project_id: str, venue_id: str) -> VenueGrid:
+    """Prefer the project's own uploaded GeoJSON; fall back to a bundled venue.
+
+    Every route that reasons about stage geometry must go through this — using
+    the bundled venue for a user-uploaded project silently scores the wrong map.
+    """
+    if project_id:
+        project = await _project_store.get(project_id)
+        if project and project.get("geojson"):
+            try:
+                return load_venue_from_geojson(
+                    project["geojson"],
+                    project.get("meta", {}),
+                    venue_id=project_id,
+                )
+            except Exception:
+                pass
+    return _get_venue(venue_id)
 
 
 # ---------- routes ----------
@@ -235,21 +258,7 @@ async def get_demand_scores(req: DemandScoresRequest):
 
 @app.post("/simulate_festival")
 async def simulate_festival(req: FestivalSimRequest):
-    # Load venue from the project's own GeoJSON, not the filesystem cache
-    venue = None
-    if req.project_id:
-        project = await _project_store.get(req.project_id)
-        if project and project.get("geojson"):
-            try:
-                venue = load_venue_from_geojson(
-                    project["geojson"],
-                    project.get("meta", {}),
-                    venue_id=req.project_id,
-                )
-            except Exception:
-                pass
-    if venue is None:
-        venue = _get_venue(req.venue_id)
+    venue = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
 
     draw: dict[str, float] = {}
@@ -273,6 +282,7 @@ async def simulate_festival(req: FestivalSimRequest):
         tickets_sold=req.sliders.tickets_sold,
         n_agents=n_agents,
         extra_obstacles=req.barriers if req.barriers else None,
+        density_orange=req.density_orange,
         density_red=req.density_red,
         affinity=affinity,
     )
@@ -293,7 +303,7 @@ async def simulate_festival(req: FestivalSimRequest):
 
 @app.post("/optimize_schedule")
 async def optimize_schedule(req: OptimizeRequest):
-    venue = _get_venue(req.venue_id)
+    venue = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
     demand = _demand_svc.compute(setlist)
 
@@ -322,7 +332,7 @@ async def optimize_schedule(req: OptimizeRequest):
 
 @app.post("/safety_briefing")
 async def safety_briefing(req: SafetyBriefingRequest):
-    venue = _get_venue(req.venue_id)
+    venue = await _resolve_venue(req.project_id, req.venue_id)
     setlist = _setlist_dicts(req.setlist)
 
     demand = _demand_svc.compute(setlist)

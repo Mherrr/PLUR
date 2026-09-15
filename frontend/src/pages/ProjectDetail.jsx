@@ -170,6 +170,7 @@ export default function ProjectDetail() {
           n_agents: Math.min(simParams.tickets_sold, 8000),
         },
         barriers: barrierPolygons,
+        densityOrange: simParams.density_orange,
         densityRed: simParams.density_red,
       })
       setSimFrames(result.frames || [])
@@ -245,6 +246,7 @@ export default function ProjectDetail() {
     try {
       const headliners = setlist.filter(s => s.locked).map(s => s.artist)
       const result = await api.optimizeSchedule(
+        id,
         setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
         headliners,
         { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
@@ -275,8 +277,9 @@ export default function ProjectDetail() {
     setBriefingLoading(true)
     setBriefingText(null)
     try {
-      const peakDensity = simHotspots.reduce((max, h) => Math.max(max, h.density ?? 0), 0)
+      const peakDensity = simHotspots.reduce((max, h) => Math.max(max, h.peak_density ?? 0), 0)
       const result = await api.getSafetyBriefing(
+        id,
         setlist.map(s => ({ artist: s.artist, stage: s.stage, start: s.start, end: s.end })),
         { max_capacity: simParams.capacity, tickets_sold: simParams.tickets_sold },
         peakDensity,
