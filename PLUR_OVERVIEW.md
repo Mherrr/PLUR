@@ -118,8 +118,8 @@ All figures below are **measured**, not estimated — benchmarked on an AMD Ryze
 | Venue load (GeoJSON → UTM → rasterized grid) | 0.44 s |
 | Flow-field pathfinding | 17 destinations, 0.98 s each, 111,800 Dijkstra cells/s |
 | Macro crowd model | 7.2 ms per full-day run → 139 evaluations/s |
-| Optimizer throughput | 2,000 candidate schedules per request in 15.4 s |
-| Optimizer effectiveness | **~3% risk reduction** (see limitations — this one is weak) |
+| Optimizer throughput | 2,000 candidate schedules per request in 12.7 s |
+| Optimizer effectiveness | **~30% risk reduction**, peak stage load 1.67 → 1.41× safe capacity (was 3% before the move-set fix) |
 | Scale represented | 80,000-capacity venue, 75,000 tickets, 9-75 real people per agent |
 | Physics resolution | dt = 0.5 s, 240 substeps per 2-minute bin, 301 frames/run |
 | Frontend build | 973 modules in 3.20 s; 319 KB gzipped app bundle |
@@ -132,7 +132,8 @@ All figures below are **measured**, not estimated — benchmarked on an AMD Ryze
 ## Honest limitations — do not overclaim
 
 - **No validation against ground truth.** The simulation has never been calibrated against real crowd data from HARD Summer or any other event. Hotspot densities carry an empirical 0.56 scaling factor, and reported "pressure" is a derived `0.3 * density` display value, not the velocity-variance pressure metric that exists in the codebase but is not wired to any route. Describe outputs as plausible and directionally useful, never as accurate predictions.
-- **Heuristic, not globally optimal.** Barrier and amenity placements are drawn by the user; the schedule optimizer is local search with no optimality guarantee. The project documentation itself insists on the word "recommended."
+- **Heuristic, not globally optimal.** Barrier and amenity placements are drawn by the user; the schedule optimizer is local search with no optimality guarantee, and it still plateaus before exhausting its iteration budget. The project documentation itself insists on the word "recommended."
+- **Density magnitudes are plausible but uncalibrated.** The kernel estimator puts peaks at 5–9.5 p/m² around the 6 p/m² crush threshold, which is the right order of magnitude, but its resolution depends on agent count (0.60× lower at 8,000 agents than 2,000 on the same schedule) and nothing has been checked against real event measurements.
 - **Some planned components are unwired.** A fuller risk analyzer (`sim/risk.py`, with real pressure math and zone classification) and an automated mitigation planner (`optimize/mitigation.py`, which suggests barrier segments and staff positions) are implemented but unreachable from the API. The original "two-tier macro-seeds-micro" architecture was simplified during the build into a single full-day agent run, with the macro model retained for optimizer scoring and risk windows.
 - **Prototype-grade edges.** Unpinned dependencies and a committed Redis dump remain. (A round of bug fixes landed after the hackathon: the safety briefing's peak-density field mismatch, the dead orange-threshold slider, the optimizer and briefing routes ignoring a user-uploaded project's own GeoJSON, and a stale Claude model id are all fixed.)
 - **The "44 cores across 7 VMs" figure is a deployment target from the infrastructure plan, not a constant in the code.** The code reads a scheduler address from an environment variable and reports whatever worker count it finds. If asked about scale, describe the topology as provisioned infrastructure and be ready to say it also runs on one laptop.
@@ -152,7 +153,13 @@ Pick 2-3; they overlap deliberately so you can match the role.
 > Replaced O(N²) pairwise force computation with a CSR spatial hash rebuilt every physics step, cutting per-step cost **135× at 8,000 agents** (970 ms → 7.2 ms) while proving equivalence to 2 × 10⁻¹⁶ relative error; numba JIT compilation of the force kernel contributed a further **200×** over the equivalent pure-Python implementation.
 
 **Profiling / measurement rigor**
-> Benchmarked the full pipeline and corrected a threading misconfiguration in which `joblib`'s thread backend made GIL-bound candidate scoring **1.96× slower than serial execution**, and documented that the schedule optimizer plateaus after ~100 of its 300 search iterations — replacing unverified performance claims in the README with a reproducible benchmark suite.
+> Benchmarked the full pipeline and corrected a threading misconfiguration in which `joblib`'s thread backend made GIL-bound candidate scoring **1.96× slower than serial execution**, replacing unverified performance claims in the README with a reproducible benchmark suite.
+
+**Diagnosis / measurement correctness** (good for interviews — it's a debugging story)
+> Traced implausible crowd-density readings to a sampling artifact rather than a calibration error: agents were point-binned into single 1.5 m grid cells and scaled by people-per-agent, making reported density an integer multiple of the agent's own weight and therefore a function of the agent-count slider rather than the crowd. Replaced it with a Gaussian kernel density estimator with boundary correction, bringing peaks from 66.7 to 7.8–9.5 p/m² — either side of the 6 p/m² crush threshold — and retiring a hardcoded fudge factor.
+
+**Search / optimization**
+> Diagnosed why a crowd-risk schedule optimizer could only find ~3% improvement: its swap-only move set permuted artists between filled slots while leaving the set of occupied slots invariant, freezing the very time distribution that drives concurrency. Adding relocation into open slots raised risk reduction to **~30%** and cut peak stage load from 1.67 to 1.41× safe capacity, while halving request latency by replacing deep copies in the candidate-generation hot path.
 
 **Geospatial engineering**
 > Built the venue pipeline converting hand-traced GeoJSON footprints to simulation-ready occupancy grids — shapely polygon boolean algebra, pyproj WGS84→UTM reprojection, vectorized rasterization to a **366,704-cell grid at 1.5 m resolution** — in 0.44 s, with user-drawn barriers rasterized into the navigable environment between runs.
@@ -164,7 +171,7 @@ Pick 2-3; they overlap deliberately so you can match the role.
 > Shipped an end-to-end crowd-safety planning tool in a two-day hackathon: FastAPI + Redis backend, React/deck.gl WebGL map with direct-manipulation barrier editing (drag, resize, rotate) and drag-and-drop schedule building, Last.fm/Ticketmaster demand modeling with a z-scored composite draw index, and Claude-generated pre-event safety briefings.
 
 **If asked "what would you do differently"**
-> The optimizer is the weak link — a strict hill-climb that plateaus at ~3% risk reduction. I'd add restarts and equal-cost move acceptance, wire in the velocity-variance pressure metric already written but unconnected, and calibrate hotspot densities against real event data, since the current 0.56 scaling factor produces physically implausible peaks.
+> The search still plateaus — 300 iterations returns identical results to 100, so the strict hill-climb is leaving improvement on the table; restarts and equal-cost move acceptance are the obvious next step. The risk objective is a sum rather than a max, so it can improve the total while the worst single moment barely moves. And nothing is validated against real event data — the density estimator now produces plausible magnitudes, but plausible isn't calibrated.
 
 **Outreach framing, research contexts**
 > PLUR is an attempt to make pedestrian-dynamics simulation usable as a *planning* interface rather than an offline analysis artifact. The interesting problem wasn't the social-force model itself — it was closing the loop: making a full-day agent simulation cheap enough to re-run after every intervention, and making the intervention surface (barriers, amenity placement, the lineup itself) something a safety planner could actually manipulate. The signal-extraction problem turned out to be as hard as the physics: raw density flags the front of every stage, which is exactly where crowds belong, so hazard detection required masking expected-dense regions and weighting by corridor geometry.

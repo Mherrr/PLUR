@@ -43,6 +43,28 @@ def _slot_position_draw(artist: str, setlist: list[dict]) -> float:
         return 0.2
     # Linear map: earliest slot → 0.10, latest slot → 0.75
     return round(0.10 + 0.65 * (artist_start - t_min) / (t_max - t_min), 3)
+
+
+def _ensure_varied_draw(draw: dict[str, float], setlist: list[dict]) -> dict[str, float]:
+    """Guarantee the draw scores actually discriminate between artists.
+
+    DemandService z-scores its components, so with no Last.fm key every artist
+    lands on exactly 0.5. Filling in only the *missing* artists doesn't help —
+    they aren't missing, they're uniform — and a uniform draw makes every
+    arrangement of the lineup score identically, leaving the optimizer with
+    nothing it can improve. Detect that collapse and fall back to schedule
+    position for the whole lineup.
+    """
+    draw = dict(draw)
+    for entry in setlist:
+        if entry["artist"] not in draw:
+            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
+    values = list(draw.values())
+    if len(values) > 1 and max(values) - min(values) < 1e-9:
+        return {
+            e["artist"]: _slot_position_draw(e["artist"], setlist) for e in setlist
+        }
+    return draw
 _venue_cache: dict[str, VenueGrid] = {}
 
 app = FastAPI(
@@ -269,9 +291,7 @@ async def simulate_festival(req: FestivalSimRequest):
         affinity = demand.get("affinity", {})
     except Exception:
         pass
-    for entry in setlist:
-        if entry["artist"] not in draw:
-            draw[entry["artist"]] = _slot_position_draw(entry["artist"], setlist)
+    draw = _ensure_varied_draw(draw, setlist)
 
     n_agents = min(req.sliders.n_agents, 8000)
     result = submit(
@@ -309,7 +329,7 @@ async def optimize_schedule(req: OptimizeRequest):
 
     result = _scheduler.optimize(
         setlist=setlist,
-        draw=demand["draw"],
+        draw=_ensure_varied_draw(demand["draw"], setlist),
         affinity=demand["affinity"],
         stages=venue.stages,
         headliners=req.headliners,
@@ -341,7 +361,7 @@ async def safety_briefing(req: SafetyBriefingRequest):
     setlist = _setlist_dicts(req.setlist)
 
     demand = _demand_svc.compute(setlist)
-    draw = demand.get("draw", {})
+    draw = _ensure_varied_draw(demand.get("draw", {}), setlist)
     affinity = demand.get("affinity", {})
 
     macro_result = _macro_model.run(

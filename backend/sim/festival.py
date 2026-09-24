@@ -3,6 +3,8 @@ flow-field pathfinding, migrate between sets, and exit at the end."""
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
+
 from ..venue.loader import VenueGrid
 from .pathfinding import FlowFieldCache, sample_flow
 from .micro import _precompute_walls, _build_spatial_hash, _force_kernel
@@ -36,6 +38,17 @@ def _just_ended(setlist: list[dict], t_min: int, window: int = 5) -> list[dict]:
 def _upcoming_sets(setlist: list[dict], t_min: int, lookahead: int = 60) -> list[dict]:
     return [s for s in setlist if 0 < s["start_min"] - t_min <= lookahead]
 
+
+# Radius over which crowd density is measured, in metres.
+#
+# A simulated agent stands for `tickets_sold / n_agents` real people. Binning
+# that whole group into the single grid cell the agent occupies makes density a
+# function of the agent count rather than of the crowd: one agent then reads
+# 16.7 people/m² at 2,000 agents but 4.2 at 8,000, for the same schedule.
+# Spreading each agent's group over a kernel instead (Steffen & Seyfried's
+# Gaussian density estimator) converges as resolution improves. 2 m is the
+# conventional measurement radius for pedestrian crowds.
+DENSITY_SIGMA_M = 2.0
 
 _AMENITY_DWELL_MIN: dict[str, float] = {
     "restroom": 1.5,   # base dwell time in sim-minutes (90 s)
@@ -233,6 +246,17 @@ def run_festival(
 
     # track peak instantaneous density per cell (people/m²) across all bins
     density_accum = np.zeros((rows, cols), dtype=np.float64)
+
+    # Density measurement kernel, see DENSITY_SIGMA_M. `occ_kernel_frac` is the
+    # share of the kernel landing on walkable ground; dividing by it corrects
+    # the edge loss that would otherwise understate density in exactly the
+    # narrow corridors we care most about. Both are constant, so build once.
+    density_sigma_cells = DENSITY_SIGMA_M / venue.cell_m
+    occ_kernel_frac = gaussian_filter(
+        occupancy.astype(np.float64), sigma=density_sigma_cells, mode="constant"
+    )
+    np.maximum(occ_kernel_frac, 0.15, out=occ_kernel_frac)
+    cell_area = venue.cell_m * venue.cell_m
 
     for b in range(n_bins):
         t_min = gates_open + b * sim_bin_minutes
@@ -478,13 +502,17 @@ def run_festival(
             all_vel[active_indices] = a_vel
 
             # track peak instantaneous density per cell (people/m²)
-            cell_area = venue.cell_m * venue.cell_m
-            snap_density = np.zeros((rows, cols), dtype=np.float64)
+            counts = np.zeros((rows, cols), dtype=np.float64)
             gi_all = np.clip(((a_pos[:, 1] - oy) / venue.cell_m).astype(int), 0, rows - 1)
             gj_all = np.clip(((a_pos[:, 0] - ox) / venue.cell_m).astype(int), 0, cols - 1)
-            for ai in range(n_active):
-                snap_density[gi_all[ai], gj_all[ai]] += scale
-            snap_density /= cell_area
+            np.add.at(counts, (gi_all, gj_all), scale)
+            # Spread each agent's represented group over the measurement radius
+            # rather than dumping it all into the one cell the agent stands in.
+            snap_density = gaussian_filter(
+                counts, sigma=density_sigma_cells, mode="constant"
+            )
+            snap_density /= occ_kernel_frac * cell_area
+            snap_density *= occupancy
             np.maximum(density_accum, snap_density, out=density_accum)
 
             # --- check for agents reaching the gate (exit) ---
@@ -632,7 +660,9 @@ def run_festival(
                 cx = ox + (avg_c + 0.5) * venue.cell_m
                 cy = oy + (avg_r + 0.5) * venue.cell_m
                 lon, lat = venue.to_lonlat(cx, cy)
-                display_density = peak_raw * 0.56
+                # No display factor: peak_raw is now a real kernel-measured
+                # density in people/m², not an agent headcount needing a fudge.
+                display_density = peak_raw
                 hotspots.append({
                     "lon": float(lon),
                     "lat": float(lat),

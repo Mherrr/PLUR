@@ -72,12 +72,39 @@ def _score_schedule(
     return total
 
 
+def _copy_setlist(setlist: list[dict]) -> list[dict]:
+    # Entries are flat dicts of scalars, so a shallow copy per entry is
+    # equivalent to deepcopy here and materially cheaper — this runs once per
+    # candidate, thousands of times per request.
+    return [dict(e) for e in setlist]
+
+
 def _swap_slots(setlist: list[dict], i: int, j: int) -> list[dict]:
-    new_sl = copy.deepcopy(setlist)
+    new_sl = _copy_setlist(setlist)
     new_sl[i]["stage"], new_sl[j]["stage"] = new_sl[j]["stage"], new_sl[i]["stage"]
     new_sl[i]["start"], new_sl[j]["start"] = new_sl[j]["start"], new_sl[i]["start"]
     new_sl[i]["end"], new_sl[j]["end"] = new_sl[j]["end"], new_sl[i]["end"]
     return new_sl
+
+
+def _move_to_slot(setlist: list[dict], i: int, slot: tuple[str, str, str]) -> list[dict]:
+    """Relocate one act into an empty (stage, start, end) slot."""
+    new_sl = _copy_setlist(setlist)
+    new_sl[i]["stage"], new_sl[i]["start"], new_sl[i]["end"] = slot
+    return new_sl
+
+
+def _slot_grid(setlist: list[dict], stages: list[dict]) -> list[tuple[str, str, str]]:
+    """Every (stage, start, end) the schedule grid offers, filled or not."""
+    times = sorted({(e["start"], e["end"]) for e in setlist})
+    return [(st["id"], start, end) for st in stages for start, end in times]
+
+
+def _empty_slots(
+    setlist: list[dict], grid: list[tuple[str, str, str]]
+) -> list[tuple[str, str, str]]:
+    occupied = {(e["stage"], e["start"], e["end"]) for e in setlist}
+    return [slot for slot in grid if slot not in occupied]
 
 
 class ScheduleOptimizer:
@@ -144,17 +171,29 @@ class ScheduleOptimizer:
             idx_b = int(rng_np.choice(len(swappable), p=w2))
             return swappable[idx_a], swappable[idx_b]
 
-        for _ in range(n_iterations):
-            candidates = []
-            for _ in range(pairs_per_iter):
-                candidates.append(_sample_pair())
+        # A swap-only move set can only ever permute the acts already placed,
+        # so every empty slot in the grid is unreachable — which rules out the
+        # most natural fix for an overloaded hour, moving an act into open
+        # airtime. Relocations make that reachable.
+        grid = _slot_grid(current, stages)
+        RELOCATE_FRAC = 0.4
 
-            swapped = [_swap_slots(best, i, j) for i, j in candidates]
+        for _ in range(n_iterations):
+            empties = _empty_slots(best, grid)
+            candidates: list[list[dict]] = []
+            for _ in range(pairs_per_iter):
+                if empties and rng_np.random() < RELOCATE_FRAC:
+                    idx = swappable[int(rng_np.choice(len(swappable), p=sw_weights))]
+                    slot = empties[int(rng_np.integers(len(empties)))]
+                    candidates.append(_move_to_slot(best, idx, slot))
+                else:
+                    i, j = _sample_pair()
+                    candidates.append(_swap_slots(best, i, j))
 
             if is_distributed():
                 arg_lists = [
                     (sl, draw, affinity, stages, tickets_sold, max_capacity, macro)
-                    for sl in swapped
+                    for sl in candidates
                 ]
                 scores = map_calls(_score_schedule, arg_lists)
             else:
@@ -162,13 +201,13 @@ class ScheduleOptimizer:
                     delayed(_score_schedule)(
                         sl, draw, affinity, stages, tickets_sold, max_capacity, macro
                     )
-                    for sl in swapped
+                    for sl in candidates
                 )
 
             min_idx = int(np.argmin(scores))
             if scores[min_idx] < best_score:
                 best_score = scores[min_idx]
-                best = _swap_slots(best, *candidates[min_idx])
+                best = candidates[min_idx]
 
         changes = _compute_changes(setlist, best)
 

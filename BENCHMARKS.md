@@ -112,32 +112,54 @@ The API previously called the optimizer with `n_jobs=4`, making it **1.96×
 slower than serial**. It now calls `n_jobs=1`. Genuine parallelism comes from
 the Dask path (`cluster.map_calls`), which bypasses joblib entirely.
 
-### Optimizer effectiveness — the honest number
+### Optimizer effectiveness — before and after the move-set fix
 
-| Scenario | Risk before | Risk after | Reduction |
-|---|---|---|---|
-| Balanced fixture schedule, varied draw scores | 324.87 | 315.25 | **2.96%** |
-| Deliberately stacked schedule (6 top acts concurrent on the two closest stages) | 472.73 | 463.36 | **1.98%** |
-| Any schedule, no Last.fm key configured | 419.65 | 419.65 | **0.00%** |
+The original search could only swap the `(stage, start, end)` triple between
+two *filled* entries. Swaps permute which artist sits in which slot but leave
+the set of occupied slots untouched, so the schedule's time distribution was
+frozen — and reducing concurrency is precisely a matter of changing that
+distribution. Adding a relocate-into-an-empty-slot move, plus a guard against
+the uniform-draw collapse below, produced:
 
-Three findings worth stating plainly:
+| Scenario | Before | After |
+|---|---|---|
+| Balanced fixture schedule, varied draw | **2.96%** | **29.49%** |
+| Through the live API, no Last.fm key | **0.00%** | **35.84%** |
+| Peak stage load (worst single moment) | 1.671 → 1.671× | **1.671 → 1.414×** |
+| `/optimize_schedule` latency | 23.0 s | **12.7 s** |
 
-1. **The search plateaus early.** 300 iterations returns byte-identical results
-   to 100 (same risk, same 17 changes) — the strict hill-climb reaches a local
-   minimum well before the iteration budget, so the extra 4,000 candidate
-   evaluations are wasted work.
-2. **Peak stage load barely moves** — 2.30 → 2.29 × safe capacity on the
-   stacked schedule. The objective's summed cubic term improves while the worst
-   single moment does not.
-3. **Without a Last.fm key the optimizer is inert.** `DemandService` z-scores
-   the draw components, so with no API data every artist scores exactly 0.5,
-   every arrangement scores identically, and nothing can improve. The
-   slot-position fallback in `main.py` only fills artists *missing* from the
-   draw dict, and these are present-but-uniform, so it never engages on this
-   route.
+Peak stage load is the number that matters for safety, and it is the one that
+previously refused to move. The latency drop is incidental — candidate
+construction switched from `copy.deepcopy` to a per-entry shallow copy, which
+is equivalent for these flat dicts.
 
-Headliner locking was verified: with 5 artists passed as headliners, **0 were
-moved** across 1,000 candidate evaluations.
+The output stays realistic rather than gaming the objective: all 5 stages
+remain in use, sets per stage stay within 6–7, and maximum concurrency is
+unchanged at 5 sets per hour. Headliner locking still holds — 5 locked
+artists, **0 moved**. No slot collisions, and the artist roster is preserved
+exactly.
+
+**The uniform-draw collapse.** `DemandService` z-scores its draw components, so
+with no Last.fm key every artist scores exactly 0.5. Under swap-only moves that
+made every arrangement score identically and the optimizer strictly inert.
+`main.py` now routes draw scores through `_ensure_varied_draw()`, which detects
+the collapse and substitutes the slot-position heuristic — the previous
+fallback only filled artists *missing* from the dict, and these were
+present-but-uniform. Varied draws are still worth having: 29.49% with them
+versus 24.27% feeding a uniform vector straight in.
+
+### Still outstanding
+
+- **The search still plateaus.** 300 iterations returns byte-identical results
+  to 100 (same 24 changes, same 229.057 score). The strict hill-climb reaches a
+  local minimum early, so two thirds of the iteration budget is wasted.
+  Accepting equal-cost moves, random restarts, or annealing would each help.
+- **The fixture barely exercises relocation** — its grid is 35 slots with 34
+  filled, so only one hole exists to shuffle. A real schedule with more open
+  airtime should gain more, which is untested here.
+- **The objective is still a sum, not a max**, so it can trade a better total
+  against the worst moment. Peak load improved this time as a side effect, not
+  because anything targets it.
 
 ## 6. API layer (live server + Redis)
 
@@ -173,46 +195,50 @@ A 301-frame simulation result round-trips through Redis intact.
 
 These are engineering throughput numbers, not validated safety predictions.
 
-- **Reported density is a sampling artifact, not a measurement — and no
-  calibration constant can fix it.** `festival.py` bins each agent into one
-  1.5 m cell and multiplies by `tickets_sold / n_agents`, so a single agent
-  landing in a cell registers `scale / 2.25` p/m² all at once. At 2,000 agents
-  that quantum is 16.7 p/m² raw (9.3 displayed), and every reported hotspot
-  density is an exact integer multiple of it: the observed 28.0 and 18.7 are
-  precisely 3 and 2 agents in a cell.
+- **Density is now kernel-measured, but its resolution still depends on agent
+  count.** The original estimator binned each agent into one 1.5 m cell and
+  multiplied by `tickets_sold / n_agents`, so one agent registered
+  `scale / 2.25` p/m² at once — 16.7 p/m² at 2,000 agents. Every reported
+  hotspot density was an exact integer multiple of that quantum (the observed
+  28.0 and 18.7 were precisely 3 and 2 agents in a cell), which made the number
+  a readout of the agent-count slider rather than of the crowd. No constant
+  could fix it: landing near 6 p/m² needed 0.09 at 2,000 agents and 0.16 at
+  8,000 for the same crowd, and 46% of the venue read as crush risk.
 
-  The consequence is that **the number tracks the agent-count slider, not the
-  crowd.** Running the identical schedule at 2,000 vs 8,000 agents:
+  `festival.py` now spreads each agent's represented group over a
+  `DENSITY_SIGMA_M = 2.0` m Gaussian kernel (Steffen & Seyfried's estimator),
+  with an edge correction dividing by the share of the kernel that lands on
+  walkable ground so density in narrow corridors isn't understated. The 0.56
+  display factor is gone. Same schedule, same two agent counts:
 
-  | Estimator | 2,000 agents | 8,000 agents | Change |
+  | | 2,000 agents | 8,000 agents | Ratio |
   |---|---|---|---|
-  | Nearest-cell (current) | 66.7 p/m² | 37.5 p/m² | **0.56×** |
-  | Reported hotspot densities | 28.0 | 9.3 – 11.7 | **~3× lower** |
-  | Cells flagged ≥ 6 p/m² | 50,501 (46% of venue) | 23,428 (21%) | — |
-  | Gaussian σ=2 m (standard estimator) | 15.4 p/m² | 13.0 p/m² | 0.85× |
+  | Old: nearest-cell peak | 66.7 p/m² | 37.5 p/m² | 0.56× |
+  | Old: reported hotspots | 28.0 | 9.3 – 11.7 | **0.33×** |
+  | New: reported hotspots | 7.8 – 9.5 | 5.0 – 5.7 | **0.60×** |
 
-  A single factor cannot correct this: reaching a plausible ~6 p/m² peak would
-  need 0.09 at 2,000 agents and 0.16 at 8,000, for the same crowd. The
-  nearest-cell method also flags **46% of the entire venue** as crush risk.
+  The values are now physically plausible — crush conditions begin around
+  6 p/m², and these land either side of it instead of at 28. **The residual
+  0.60× drift is a real limitation, not a fixed bug.** At 2,000 agents each
+  agent still carries 37.5 people, so the kernel's smallest resolvable
+  increment is 1.49 p/m² — a quarter of the danger threshold. At 8,000 agents
+  it is 0.37 p/m². Density-sensitive work should use ≥5,000 agents; the
+  estimator now degrades gracefully with agent count instead of rescaling
+  wholesale.
 
-  The fix is a measurement radius rather than a constant — spread each agent's
-  represented people over a kernel (Steffen & Seyfried's Gaussian density
-  estimator is the standard choice), which converges as resolution improves
-  instead of quantizing. The 0.56 factor then becomes unnecessary.
+- **Hotspot levels still skew red.** Detection compares the bottleneck-weighted
+  danger score against thresholds denominated in raw density, so the comparison
+  is dimensionally inconsistent and nearly everything clears the red line. The
+  orange tier remains largely theoretical. Unfixed.
 - **Reported pressure is `0.3 × density`**, a display stand-in. The real
   velocity-variance pressure metric in `sim/risk.py` is not wired into the live
   path.
-- **Hotspot levels skew red.** Detection thresholds the bottleneck-weighted
-  danger score, which runs well above raw density, so in practice nearly every
-  detected hotspot crosses the red threshold and the orange tier rarely appears.
 - The `/simulate_festival` payload reaches **49 MB** at 8,000 agents, all of it
   JSON agent coordinates held in Redis and shipped to the browser. This is the
   first thing that would need binary framing or downsampling to scale.
-- **The optimizer cannot reach empty slots.** Its only move is swapping the
-  `(stage, start, end)` triple between two existing entries, so the schedule is
-  explored as permutations of filled slots. The fixture has 34 sets in 55 grid
-  slots; those 21 empty slots are unreachable, which rules out the simplest
-  real fix for an overloaded hour — moving an act into open airtime.
+- **Nothing is validated against real crowd data.** Plausible magnitudes are
+  not the same as calibrated ones. Treat hotspot locations as directional and
+  every absolute figure as unverified.
 
 ## Reproducing
 
@@ -227,4 +253,5 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 # with the server running and Redis up:
 .venv/Scripts/python.exe scripts/bench/bench_f_api.py      # end-to-end HTTP
 .venv/Scripts/python.exe scripts/bench/bench_i_density.py  # density estimator comparison
+.venv/Scripts/python.exe scripts/bench/bench_j_afterfix.py # after-fix verification
 ```
