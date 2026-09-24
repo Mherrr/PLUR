@@ -9,3 +9,9 @@ backend/data/cache/*.json
 .DS_Store
 results_*.json
 .uvicorn*.log
+
+# local working notes, not part of the project
+PLUR_OVERVIEW.md
+
+# redis snapshots
+*.rdb

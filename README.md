@@ -6,7 +6,7 @@ Built over a two-day hackathon (June 2026) for the Ddoski's Lab + Anthropic + Mo
 
 > **Disclaimer:** PLUR is a planning and decision-support prototype. It is not a validated or certified life-safety system. Every recommendation it produces must be reviewed by qualified event-safety professionals.
 
-**Measured on one 8-core desktop:** a full 10-hour event day with 8,000 agents resolves **340.9 M agent-force evaluations in 295 s** (122× faster than real time). The CSR spatial hash beats an all-pairs kernel by **135×** at 8,000 agents while agreeing to 2 × 10⁻¹⁶ relative error, and numba JIT gives **200×** over the same algorithm in pure Python. Full methodology, reproduction steps, and the less flattering numbers are in [BENCHMARKS.md](BENCHMARKS.md).
+**Measured on one 8-core desktop:** a full 10-hour event day with 8,000 agents resolves **340.9 M agent-force evaluations in 295 s** (122× faster than real time). The CSR spatial hash beats an all-pairs kernel by **135×** at 8,000 agents while agreeing to 2 × 10⁻¹⁶ relative error, and numba JIT gives **200×** over the same algorithm in pure Python. Full methodology, reproduction steps, and the less flattering numbers are in [PLUR_BENCHMARKS.md](PLUR_BENCHMARKS.md).
 
 ---
 
@@ -118,7 +118,7 @@ Both degrade to deterministic placeholder text when `ANTHROPIC_API_KEY` is absen
 
 ## Distributed execution
 
-`backend/cluster.py` is a dual-mode dispatcher. If `DASK_SCHEDULER` is set it connects a `dask.distributed.Client`; if it is unset, empty, or the connection fails, everything runs in-process on the coordinator. The design target documented in `SURGE_Team_Handoff.md` is an ESXi cluster of 5-6 Ubuntu VMs at 8 vCPUs each (about 44 cores, the ESXi per-host licensing cap), one coordinator running FastAPI plus the Dask scheduler, the rest running `dask worker --nworkers 8 --nthreads 1`.
+`backend/cluster.py` is a dual-mode dispatcher. If `DASK_SCHEDULER` is set it connects a `dask.distributed.Client`; if it is unset, empty, or the connection fails, everything runs in-process on the coordinator. The deployment target is an ESXi cluster of 5-6 Ubuntu VMs at 8 vCPUs each (about 44 cores, the ESXi per-host licensing cap), one coordinator running FastAPI plus the Dask scheduler, the rest running `dask worker --nworkers 8 --nthreads 1`.
 
 What the cluster actually buys you:
 
@@ -343,7 +343,7 @@ Both the orange and red thresholds are sent to the backend. Hotspots are detecte
 
 ## Known gaps
 
-Measured rather than guessed — see [BENCHMARKS.md](BENCHMARKS.md) § Caveats for the data behind these.
+Measured rather than guessed — see [PLUR_BENCHMARKS.md](PLUR_BENCHMARKS.md) § Caveats for the data behind these.
 
 - **The optimizer's search still plateaus.** 300 iterations returns byte-identical results to 100, so the strict hill-climb finds its local minimum early and two thirds of the budget is wasted. Equal-cost move acceptance, restarts, or annealing would each help. (It is no longer *weak* — relocation moves took it from ~3% to ~30% risk reduction — but it is still leaving improvement on the table.)
 - **The objective is a sum, not a max**, so it can trade a better total against the worst single moment. Peak stage load did improve (1.671 → 1.414× safe capacity) but as a side effect, not because anything targets it.
@@ -354,4 +354,3 @@ Measured rather than guessed — see [BENCHMARKS.md](BENCHMARKS.md) § Caveats f
 - The map has no satellite or street basemap — it renders venue geometry over a flat dark background. Adding a raster tile source to the MapLibre style is a small change.
 - Nothing is calibrated against real crowd data. Treat every output as directional, not predictive.
 - `requirements.txt` is unpinned. Dask requires identical library versions across every node, so pin before deploying to a cluster.
-- `dump.rdb` is committed and contains demo projects.

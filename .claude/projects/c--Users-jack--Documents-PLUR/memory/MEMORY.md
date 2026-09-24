@@ -1,1 +1,0 @@
-- [Current teammate](user_current_teammate.md) — less familiar with backend/parallel, needs clear testing instructions
