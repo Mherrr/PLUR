@@ -317,7 +317,12 @@ async def optimize_schedule(req: OptimizeRequest):
         max_capacity=req.sliders.max_capacity,
         macro_model=_macro_model,
         n_iterations=100,
-        n_jobs=4,
+        # Serial on purpose. The local path uses joblib with prefer="threads",
+        # and _score_schedule is GIL-bound Python/numpy, so threads only add
+        # dispatch overhead: measured 6.8s at n_jobs=1 vs 13.3s at n_jobs=4 for
+        # the same 800 candidates, bit-identical results. Real parallelism comes
+        # from the Dask path in cluster.map_calls, which ignores n_jobs.
+        n_jobs=1,
     )
 
     rationale = _agent.generate_rationale(

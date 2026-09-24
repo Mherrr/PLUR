@@ -6,6 +6,8 @@ Built over a two-day hackathon (June 2026) for the Ddoski's Lab + Anthropic + Mo
 
 > **Disclaimer:** PLUR is a planning and decision-support prototype. It is not a validated or certified life-safety system. Every recommendation it produces must be reviewed by qualified event-safety professionals.
 
+**Measured on one 8-core desktop:** a full 10-hour event day with 8,000 agents resolves **340.9 M agent-force evaluations in 295 s** (122× faster than real time). The CSR spatial hash beats an all-pairs kernel by **135×** at 8,000 agents while agreeing to 2 × 10⁻¹⁶ relative error, and numba JIT gives **200×** over the same algorithm in pure Python. Full methodology, reproduction steps, and the less flattering numbers are in [BENCHMARKS.md](BENCHMARKS.md).
+
 ---
 
 ## What it does
@@ -123,7 +125,9 @@ What the cluster actually buys you:
 | Workload | Distributed | Local |
 |---|---|---|
 | `/simulate_festival` | one `submit()` — the whole run is a **single task offloaded to one worker**; the cluster does not parallelize a single sim | runs in-process |
-| `/optimize_schedule` | `map_calls()` fans the 20 candidate scores per iteration across workers | `joblib.Parallel(n_jobs=4, prefer="threads")` |
+| `/optimize_schedule` | `map_calls()` fans the 20 candidate scores per iteration across workers | serial — see below |
+
+The local path runs candidate scoring **serially on purpose**. `joblib` is configured with `prefer="threads"`, and `_score_schedule` is GIL-bound Python/numpy, so threads only add dispatch overhead: 6.81 s at `n_jobs=1` versus 13.32 s at `n_jobs=4` for the same 800 candidates, with bit-identical results. Real parallelism requires the Dask path, which bypasses joblib.
 
 A single day-long simulation is sequential in time, so it cannot be split across cores. The cluster is a *throughput* win for candidate-schedule search, and keeps the sim off the coordinator so the API stays responsive. Everything runs correctly on one machine; `GET /health` reports the live worker count.
 
@@ -164,9 +168,9 @@ These files exist and are functional in isolation, but no route reaches them:
 
 ### Prerequisites
 
-- Python 3.12
-- Node.js 18+
-- Redis on `localhost:6379`
+- Python 3.12 — **not 3.13+**; numba has no wheels for newer versions yet. If your system Python is newer, `uv python install 3.12` then `uv venv --python 3.12 .venv` gets you a clean interpreter without touching it.
+- Node.js 18+ (verified on 24.19)
+- Redis on `localhost:6379`. On Windows, the winget `Redis.Redis` package is the 3.0.504 legacy port, which predates the `HELLO` command that redis-py 5+ uses to negotiate RESP3 — either pin `redis==4.6.0` locally or run a current server under WSL, Docker, or Memurai.
 - Last.fm API key — free, key-only, at [last.fm/api](https://www.last.fm/api)
 - Anthropic API key — for `/optimize_schedule` rationale and `/safety_briefing`
 - Ticketmaster Discovery key (optional) — free tier, 5k req/day
@@ -339,8 +343,15 @@ Both the orange and red thresholds are sent to the backend. Hotspots are detecte
 
 ## Known gaps
 
+Measured rather than guessed — see [BENCHMARKS.md](BENCHMARKS.md) § Caveats for the data behind these.
+
+- **The schedule optimizer is weak.** It removes ~3% of the risk score from a balanced schedule and ~2% from a deliberately stacked one, and peak stage load barely moves (2.30 → 2.29 × safe capacity). The strict hill-climb plateaus early: 300 iterations returns byte-identical results to 100, so most of the iteration budget is wasted. Accepting equal-cost moves, random restarts, or annealing would all help.
+- **With no Last.fm key the optimizer does nothing at all.** `DemandService` z-scores its draw components, so with no API data every artist scores exactly 0.5 and every arrangement scores identically. The slot-position fallback in `main.py` only fills artists *missing* from the draw dict, so it never engages here — unlike `/simulate_festival`, which does get varied draws.
+- **Hotspot densities are uncalibrated.** The 0.56 scaling factor yields peaks near 28 p/m², which is physically implausible given crush begins around 6. Locations are directional; absolute values are not trustworthy.
+- **Reported pressure is a `0.3 × density` stand-in.** The real velocity-variance pressure metric in `sim/risk.py` is still unwired.
+- **Hotspot levels skew red.** Detection thresholds the bottleneck-weighted danger score, which runs well above raw density, so the orange tier rarely appears in practice.
+- **Sim payloads get large** — 49 MB of JSON agent coordinates at 8,000 agents, held in Redis and shipped to the browser. Binary framing or downsampling is the first thing needed to scale.
 - The map has no satellite or street basemap — it renders venue geometry over a flat dark background. Adding a raster tile source to the MapLibre style is a small change.
-- Reported hotspot density carries a 0.56 calibration factor, and pressure is a `0.3 * density` stand-in rather than the velocity-variance pressure implemented in `sim/risk.py`. Replacing both means wiring that module into the live path.
-- Nothing is calibrated against real crowd data. Treat outputs as directional, not predictive.
+- Nothing is calibrated against real crowd data. Treat every output as directional, not predictive.
 - `requirements.txt` is unpinned. Dask requires identical library versions across every node, so pin before deploying to a cluster.
 - `dump.rdb` is committed and contains demo projects.

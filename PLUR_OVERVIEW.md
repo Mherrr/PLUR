@@ -105,15 +105,25 @@ Translating a real safety problem into tractable computation: the two-tier decis
 
 ## Concrete details worth citing
 
-| Fact | Value |
+All figures below are **measured**, not estimated — benchmarked on an AMD Ryzen 7 7800X3D (8 cores), 31 GB RAM, single-node mode. Methodology and reproduction scripts are in the repo's `BENCHMARKS.md` and `scripts/bench/`.
+
+| Fact | Measured value |
 |---|---|
-| Scale simulated | 80,000-capacity venue, up to 8,000 agents each representing ~10-15 real attendees |
-| Simulated duration | Full event day — gates open through final egress, ~12 hours |
-| Physics resolution | dt = 0.5 s, 240 steps per 2-minute bin |
-| Spatial resolution | 1.5 m occupancy grid; 2 m spatial-hash cells |
-| Optimizer throughput | ~2,000 candidate schedules evaluated per request |
-| Cluster target | 5-6 ESXi VMs, ~44 cores, Dask scheduler + workers |
-| Crush threshold | 6 people/m2 (red); 4 p/m2 caution, 3 p/m2 comfortable |
+| Full event day, 8,000 agents | **340.9 M agent-force evaluations in 295 s — 122× faster than real time** |
+| Full event day, 5,000 agents (demo default) | 213.0 M evaluations in 188 s — 192× real time |
+| Peak kernel throughput | **1.16 M agent-physics-steps/s** |
+| Spatial hash vs. all-pairs O(N²) | **135× faster at 8,000 agents** (29× at 1,000), agreeing to 2 × 10⁻¹⁶ relative error |
+| numba JIT vs. same algorithm in pure Python | **200×** |
+| Occupancy grid | 656 × 559 = 366,704 cells, 109,445 walkable, 1.5 m resolution, 60.8 acres |
+| Venue load (GeoJSON → UTM → rasterized grid) | 0.44 s |
+| Flow-field pathfinding | 17 destinations, 0.98 s each, 111,800 Dijkstra cells/s |
+| Macro crowd model | 7.2 ms per full-day run → 139 evaluations/s |
+| Optimizer throughput | 2,000 candidate schedules per request in 15.4 s |
+| Optimizer effectiveness | **~3% risk reduction** (see limitations — this one is weak) |
+| Scale represented | 80,000-capacity venue, 75,000 tickets, 9-75 real people per agent |
+| Physics resolution | dt = 0.5 s, 240 substeps per 2-minute bin, 301 frames/run |
+| Frontend build | 973 modules in 3.20 s; 319 KB gzipped app bundle |
+| Cluster target (provisioned, not benchmarked) | 5-6 ESXi VMs, ~44 cores, Dask scheduler + workers |
 | Codebase | ~7,000 lines across Python backend and React frontend |
 | Build time | 2 days, 3 contributors |
 
@@ -131,14 +141,30 @@ Translating a real safety problem into tractable computation: the two-tier decis
 
 ## Suggested framings
 
-**Resume bullet, simulation-heavy roles**
-> Built the simulation engine for a festival crowd-crush prediction tool: a numba-JIT Helbing–Molnar social-force model with granular contact, CSR spatial hashing for O(N) neighbor queries, and Dijkstra-derived flow-field navigation over a UTM-projected occupancy grid, simulating a full 12-hour event day for an 80,000-capacity venue.
+### Resume bullets (all numbers measured)
 
-**Resume bullet, distributed/infra roles**
-> Designed a dual-mode Dask execution layer that transparently fans schedule-optimization candidate scoring across a self-provisioned ESXi cluster (~44 cores) or falls back to in-process joblib, so the same code path runs identically on a laptop or a cluster with no correctness dependency on the distributed tier.
+Pick 2-3; they overlap deliberately so you can match the role.
 
-**Resume bullet, full-stack / applied roles**
-> Shipped an end-to-end crowd-safety planning tool in a two-day hackathon: FastAPI + Redis backend, React/deck.gl WebGL map with direct-manipulation barrier editing and drag-and-drop schedule building, Last.fm/Ticketmaster demand modeling, and Claude-generated safety briefings.
+**Simulation / scientific computing**
+> Built the simulation engine for a festival crowd-crush prediction tool — a numba-JIT Helbing–Molnár social-force model with granular contact over Dijkstra-derived flow-field navigation — resolving **340 million agent-force evaluations in under 5 minutes** to simulate a full 10-hour event day for an 80,000-capacity venue at **122× real time**.
+
+**Performance engineering** (the strongest single bullet)
+> Replaced O(N²) pairwise force computation with a CSR spatial hash rebuilt every physics step, cutting per-step cost **135× at 8,000 agents** (970 ms → 7.2 ms) while proving equivalence to 2 × 10⁻¹⁶ relative error; numba JIT compilation of the force kernel contributed a further **200×** over the equivalent pure-Python implementation.
+
+**Profiling / measurement rigor**
+> Benchmarked the full pipeline and corrected a threading misconfiguration in which `joblib`'s thread backend made GIL-bound candidate scoring **1.96× slower than serial execution**, and documented that the schedule optimizer plateaus after ~100 of its 300 search iterations — replacing unverified performance claims in the README with a reproducible benchmark suite.
+
+**Geospatial engineering**
+> Built the venue pipeline converting hand-traced GeoJSON footprints to simulation-ready occupancy grids — shapely polygon boolean algebra, pyproj WGS84→UTM reprojection, vectorized rasterization to a **366,704-cell grid at 1.5 m resolution** — in 0.44 s, with user-drawn barriers rasterized into the navigable environment between runs.
+
+**Distributed systems / infra**
+> Designed a dual-mode Dask execution layer that fans schedule-optimization candidate scoring across a self-provisioned ESXi cluster (~44 cores, golden-image VM cloning via `ovftool`) or degrades transparently to in-process execution, so the same code path runs identically on one laptop or the full cluster with no correctness dependency on the distributed tier.
+
+**Full-stack / applied**
+> Shipped an end-to-end crowd-safety planning tool in a two-day hackathon: FastAPI + Redis backend, React/deck.gl WebGL map with direct-manipulation barrier editing (drag, resize, rotate) and drag-and-drop schedule building, Last.fm/Ticketmaster demand modeling with a z-scored composite draw index, and Claude-generated pre-event safety briefings.
+
+**If asked "what would you do differently"**
+> The optimizer is the weak link — a strict hill-climb that plateaus at ~3% risk reduction. I'd add restarts and equal-cost move acceptance, wire in the velocity-variance pressure metric already written but unconnected, and calibrate hotspot densities against real event data, since the current 0.56 scaling factor produces physically implausible peaks.
 
 **Outreach framing, research contexts**
 > PLUR is an attempt to make pedestrian-dynamics simulation usable as a *planning* interface rather than an offline analysis artifact. The interesting problem wasn't the social-force model itself — it was closing the loop: making a full-day agent simulation cheap enough to re-run after every intervention, and making the intervention surface (barriers, amenity placement, the lineup itself) something a safety planner could actually manipulate. The signal-extraction problem turned out to be as hard as the physics: raw density flags the front of every stage, which is exactly where crowds belong, so hazard detection required masking expected-dense regions and weighting by corridor geometry.
