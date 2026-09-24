@@ -173,10 +173,32 @@ A 301-frame simulation result round-trips through Redis intact.
 
 These are engineering throughput numbers, not validated safety predictions.
 
-- **Nothing is calibrated against real crowd data.** Reported hotspot density
-  carries a hardcoded 0.56 scaling factor and peaks at 28 p/m² in the fixture
-  run — physically implausible, since crush conditions begin near 6 p/m². Treat
-  hotspot *locations* as directional and the absolute densities as uncalibrated.
+- **Reported density is a sampling artifact, not a measurement — and no
+  calibration constant can fix it.** `festival.py` bins each agent into one
+  1.5 m cell and multiplies by `tickets_sold / n_agents`, so a single agent
+  landing in a cell registers `scale / 2.25` p/m² all at once. At 2,000 agents
+  that quantum is 16.7 p/m² raw (9.3 displayed), and every reported hotspot
+  density is an exact integer multiple of it: the observed 28.0 and 18.7 are
+  precisely 3 and 2 agents in a cell.
+
+  The consequence is that **the number tracks the agent-count slider, not the
+  crowd.** Running the identical schedule at 2,000 vs 8,000 agents:
+
+  | Estimator | 2,000 agents | 8,000 agents | Change |
+  |---|---|---|---|
+  | Nearest-cell (current) | 66.7 p/m² | 37.5 p/m² | **0.56×** |
+  | Reported hotspot densities | 28.0 | 9.3 – 11.7 | **~3× lower** |
+  | Cells flagged ≥ 6 p/m² | 50,501 (46% of venue) | 23,428 (21%) | — |
+  | Gaussian σ=2 m (standard estimator) | 15.4 p/m² | 13.0 p/m² | 0.85× |
+
+  A single factor cannot correct this: reaching a plausible ~6 p/m² peak would
+  need 0.09 at 2,000 agents and 0.16 at 8,000, for the same crowd. The
+  nearest-cell method also flags **46% of the entire venue** as crush risk.
+
+  The fix is a measurement radius rather than a constant — spread each agent's
+  represented people over a kernel (Steffen & Seyfried's Gaussian density
+  estimator is the standard choice), which converges as resolution improves
+  instead of quantizing. The 0.56 factor then becomes unnecessary.
 - **Reported pressure is `0.3 × density`**, a display stand-in. The real
   velocity-variance pressure metric in `sim/risk.py` is not wired into the live
   path.
@@ -186,9 +208,11 @@ These are engineering throughput numbers, not validated safety predictions.
 - The `/simulate_festival` payload reaches **49 MB** at 8,000 agents, all of it
   JSON agent coordinates held in Redis and shipped to the browser. This is the
   first thing that would need binary framing or downsampling to scale.
-- One transient hard crash of the uvicorn worker was observed during an
-  optimize-after-simulate sequence and did not reproduce across subsequent runs
-  of the same sequence. Unexplained; noted here rather than dismissed.
+- **The optimizer cannot reach empty slots.** Its only move is swapping the
+  `(stage, start, end)` triple between two existing entries, so the schedule is
+  explored as permutations of filled slots. The fixture has 34 sets in 55 grid
+  slots; those 21 empty slots are unreachable, which rules out the simplest
+  real fix for an overloaded hour — moving an act into open airtime.
 
 ## Reproducing
 
@@ -202,4 +226,5 @@ uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 .venv/Scripts/python.exe scripts/bench/bench_e_opt2.py     # n_jobs sweep + bad schedule
 # with the server running and Redis up:
 .venv/Scripts/python.exe scripts/bench/bench_f_api.py      # end-to-end HTTP
+.venv/Scripts/python.exe scripts/bench/bench_i_density.py  # density estimator comparison
 ```
